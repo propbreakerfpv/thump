@@ -4,7 +4,7 @@ version = "0.1.0"
 authors = ["jonas breen <jonasebreen@gmail.com>"]
 edition = "2021"
 description = "music player"
-license = "GNU GENERAL PUBLIC LICENSE"
+license = "GPL-3.0-only"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
