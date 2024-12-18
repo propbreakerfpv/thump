@@ -9,28 +9,9 @@ license = "GPL-3.0-only"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-dioxus = { version = "0.6.0", features = [] }
-fltk = "1.5.1"
-fltk-theme = "0.7.3"
+iced = { version = "0.13.1", features = ["svg", "advanced", "canvas", "tokio"] }
 lazy_static = "1.5.0"
+rhai = { version = "1.20.1", features = [] }
 rodio = { version = "0.20.1", features = ["symphonia-flac"] }
 symphonia = { version = "0.5.4", features = ["all", "opt-simd"] }
-tokio = "1.42.0"
-
-[features]
-default = ["desktop"]
-web = ["dioxus/web"]
-desktop = ["dioxus/desktop"]
-mobile = ["dioxus/mobile"]
-
-[profile]
-
-[profile.wasm-dev]
-inherits = "dev"
-opt-level = 1
-
-[profile.server-dev]
-inherits = "dev"
-
-[profile.android-dev]
-inherits = "dev"
+tokio = { version = "1", features = ["full"] }

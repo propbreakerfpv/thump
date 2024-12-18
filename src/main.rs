@@ -1,130 +1,211 @@
 use std::{
     fs::File,
-    io::{self, BufReader},
-    sync::mpsc::{channel, Receiver},
+    io::BufReader,
+    process::exit,
+    sync::{
+        mpsc::{channel, Receiver, Sender},
+        Arc, Mutex,
+    },
+    thread::sleep,
     time::Duration,
 };
 
-use fltk::{
-    app::sleep,
-    button::Button,
-    draw,
-    enums::{Color, FrameType},
-    frame::Frame,
-    prelude::*,
-    valuator::{Slider, SliderType},
-    window::Window,
+use iced::{
+    time,
+    widget::{button, column, row, slider, svg},
+    Element, Subscription, Task,
 };
-use fltk_theme::colors::html;
+use rhai::Engine;
 use rodio::{Decoder, OutputStream, Sink, Source};
+use seeker::{SeekPos, Seeker};
+
+mod seeker;
+
+const SEEK_DEVIDER: i32 = 1000000;
+
+const NEXT_ICON: &[u8; 1714] = include_bytes!("../assets/next.svg");
+const PREV_ICON: &[u8; 1707] = include_bytes!("../assets/prev.svg");
+const PLAY_ICON: &[u8; 859] = include_bytes!("../assets/play.svg");
+const PAUSE_ICON: &[u8; 1624] = include_bytes!("../assets/pause.svg");
+
+#[tokio::main]
+async fn main() {
+    iced::application("Thump", State::update, State::view)
+        .subscription(State::subscription)
+        .run_with(State::new)
+        .unwrap();
+    exit(1)
+}
 
 enum PlayerMessage {
     Play,
+    Paus,
     Stop,
-    Seek(f64),
-    Quit,
-    GetPos(Box<dyn FnMut(f64) + Send>),
+    Next,
+    Prev,
+    Seek(SeekPos),
+    GetPos(Box<dyn FnMut(SeekPos) + Send>),
 }
 
-#[tokio::main]
-async fn main() -> io::Result<()> {
-    let (tx, rx) = channel::<PlayerMessage>();
-    tokio::spawn(play_manager(rx));
-
-    let app = fltk::app::App::default();
-    // let theme = ColorTheme::new(color_themes::BLACK_THEME);
-    // theme.apply();
-    // let scheme = WidgetScheme::new(fltk_theme::SchemeType::Clean);
-    // scheme.apply();
-
-    let mut win = Window::new(100, 100, 400, 300, "hello");
-    let mut frame = Frame::new(0, 0, 400, 200, "");
-    let mut play_btn = Button::new(160, 210, 80, 40, "play");
-    let mut stop_btn = Button::new(160, 250, 80, 40, "stop");
-
-    let mut seeker = Slider::new(10, 10, 300, 10, "slider");
-    seeker.set_type(SliderType::Horizontal);
-    seeker.set_frame(FrameType::RFlatBox);
-    seeker.set_color(Color::from_u32(0x868db1));
-    let seeker_tx = tx.clone();
-    seeker.set_callback(move |s| {
-        seeker_tx
-            .send(PlayerMessage::Seek(s.value()))
-            .expect("failed to send Seek message");
-        fltk::app::redraw();
-    });
-
-    seeker.draw(|s| {
-        draw::set_draw_color(Color::Blue);
-        draw::draw_pie(
-            s.x() - 10 + (s.w() as f64 * s.value()) as i32,
-            s.y() - 10,
-            30,
-            30,
-            0.,
-            360.,
-        );
-    });
-
-    let seeker_pos_tx = tx.clone();
-    let (seeker_tx, seeker_rx) = channel::<f64>();
-    tokio::spawn(async move {
-        for _ in 0.. {
-            let tx_clone = seeker_tx.clone();
-            let msg: PlayerMessage = PlayerMessage::GetPos(Box::new(move |pos| {
-                tx_clone
-                    .send(pos)
-                    .expect("failed to send position to seeker");
-            }));
-            seeker_pos_tx
-                .send(msg)
-                .expect("failed to send get_pos message");
-            sleep(0.05);
-        }
-    });
-
-    tokio::spawn(async move {
-        for pos in seeker_rx {
-            seeker.set_value(pos);
-            fltk::app::awake();
-            fltk::app::redraw();
-        }
-    });
-
-    win.set_color(html::Red);
-    play_btn.set_frame(FrameType::NoBox);
-    play_btn.set_color(html::Red);
-    stop_btn.set_frame(FrameType::NoBox);
-    stop_btn.set_color(html::Red);
-    win.end();
-    win.show();
-    let play_btn_tx = tx.clone();
-    play_btn.set_callback(move |_| {
-        frame.set_label("you clicked the button!");
-        println!("clicked");
-        play_btn_tx
-            .send(PlayerMessage::Play)
-            .expect("failed to send play message");
-    });
-    let stop_btn_tx = tx.clone();
-    stop_btn.set_callback(move |_| {
-        stop_btn_tx
-            .send(PlayerMessage::Stop)
-            .expect("failed to send stop message");
-    });
-
-    // kill all threads when the X button is clicked
-    win.set_callback(move |_| {
-        tx.send(PlayerMessage::Quit)
-            .expect("failed to send quit message");
-        app.quit();
-    });
-    app.run().expect("could not run app");
-    Ok(())
+#[derive(Debug, Clone, Copy)]
+enum Message {
+    Play,
+    Pause,
+    Next,
+    Prev,
+    SeekUpdate,
+    SeekChanged(SeekPos),
 }
 
-async fn play_manager(rx: Receiver<PlayerMessage>) {
-    // let stream_handle = OutputStream::try_default().unwrap();
+#[derive(Debug)]
+struct State {
+    player_tx: Sender<PlayerMessage>,
+    playing: bool,
+    seek_value: Arc<Mutex<SeekPos>>,
+}
+
+impl State {
+    fn new() -> (State, Task<Message>) {
+        let (tx, rx) = channel::<PlayerMessage>();
+        let (tx_rust, rx_rhai) = channel();
+        let (tx_rhai, rx_rust) = channel();
+        tokio::spawn(async move {
+            let mut engine = Engine::new();
+            engine
+                .register_fn("get", move || rx_rhai.recv().unwrap_or_default())
+                .register_fn("put", move |v: String| tx_rhai.send(v).unwrap());
+
+            engine
+                .run(
+                    r#"
+        print("from script");
+        loop {
+            let value = get();
+            print(`got ${value}`);
+        }
+        "#,
+                )
+                .expect("failed to run script");
+        });
+
+        tokio::spawn(play_manager(rx, tx_rust));
+
+        // manage seeker
+        // let seek_value = Mutex::new(0.0);
+        let seek_value = Arc::new(Mutex::new(SeekPos::from_range(0.0, 1.0)));
+        let seeker_value = seek_value.clone();
+        let seeker_tx = tx.clone();
+        // tokio::spawn(async move {
+        //     for _ in 0.. {
+        //         let sv = seeker_value.clone();
+        //         seeker_tx
+        //             .send(PlayerMessage::GetPos(Box::new(move |pos| {
+        //                 let mut sv = sv.lock().expect("failed to get mut arc");
+        //                 *sv = ((pos * SEEK_DEVIDER as f64) as u64) as f64;
+        //                 println!("just changed seek to: {}", sv);
+        //             })))
+        //             .expect("failed to send getpos message");
+        //         sleep(Duration::from_millis(50));
+        //     }
+        // });
+
+        (
+            State {
+                player_tx: tx,
+                playing: false,
+                seek_value,
+            },
+            Task::none(),
+        )
+    }
+    fn update(&mut self, message: Message) -> Task<Message> {
+        match message {
+            Message::Play => {
+                self.player_tx
+                    .send(PlayerMessage::Play)
+                    .expect("failed to send play message");
+                self.playing = true;
+                Task::none()
+            }
+            Message::Pause => {
+                self.player_tx
+                    .send(PlayerMessage::Paus)
+                    .expect("failed to send paus message");
+                self.playing = false;
+                Task::none()
+            }
+            Message::Next => {
+                self.player_tx
+                    .send(PlayerMessage::Next)
+                    .expect("failed to send next message");
+                Task::none()
+            }
+            Message::Prev => {
+                self.player_tx
+                    .send(PlayerMessage::Prev)
+                    .expect("failed to send prev message");
+                Task::none()
+            }
+            Message::SeekChanged(val) => {
+                println!("seeking: {:?}, currently at: {:?}", val, self.seek_value);
+                self.player_tx
+                    .send(PlayerMessage::Seek(val))
+                    .expect("failed to send seek message");
+                let mut seek_value = self.seek_value.lock().unwrap();
+                *seek_value = val;
+                Task::none()
+            }
+            Message::SeekUpdate => {
+                let sv = self.seek_value.clone();
+                self.player_tx
+                    .send(PlayerMessage::GetPos(Box::new(move |pos| {
+                        // println!("get pos from player {:?}", pos);
+                        let mut seek_value = sv.lock().unwrap();
+                        *seek_value = pos;
+                    })))
+                    .expect("failed to send getPos message");
+                Task::none()
+            }
+        }
+    }
+    fn view(&self) -> Element<Message> {
+        column![
+            play_controls(self.playing),
+            // seek_bar(*self.seek_value.lock().expect("mutex failed to lock")),
+            seeker::seeker(
+                *self.seek_value.lock().expect("mutex failed to lock"),
+                self.player_tx.clone()
+            )
+        ]
+        .into()
+    }
+    fn subscription(&self) -> Subscription<Message> {
+        let tick = time::every(Duration::from_millis(100)).map(|_| Message::SeekUpdate);
+        tick
+    }
+}
+
+fn play_controls(playing: bool) -> Element<'static, Message> {
+    let next_handle = svg::Handle::from_memory(NEXT_ICON);
+    let prev_handle = svg::Handle::from_memory(PREV_ICON);
+    let play_handle = svg::Handle::from_memory(PLAY_ICON);
+    let pause_handle = svg::Handle::from_memory(PAUSE_ICON);
+
+    let play_btn = if playing {
+        button(svg(pause_handle).width(25).height(25)).on_press(Message::Pause)
+    } else {
+        button(svg(play_handle).width(25).height(25)).on_press(Message::Play)
+    };
+
+    row![
+        button(svg(prev_handle).width(25).height(25)).on_press(Message::Prev),
+        play_btn,
+        button(svg(next_handle).width(25).height(25)).on_press(Message::Next),
+    ]
+    .into()
+}
+
+async fn play_manager(rx: Receiver<PlayerMessage>, tx_rust: Sender<String>) {
     let (_stream, stream_handle) =
         OutputStream::try_default().expect("could not create default OutputStream");
     let sink = Sink::try_new(&stream_handle).expect("could not create new Sink");
@@ -142,24 +223,51 @@ async fn play_manager(rx: Receiver<PlayerMessage>) {
             PlayerMessage::Play => {
                 println!("playing");
                 sink.play();
+                tx_rust
+                    .send("play".to_string())
+                    .expect("failed to send message to rhai");
             }
             PlayerMessage::Stop => {
                 println!("stoped");
                 sink.pause();
+                tx_rust
+                    .send("stop".to_string())
+                    .expect("failed to send message to rhai");
             }
             PlayerMessage::Seek(place) => {
-                println!("seeking {}", place);
-                let pos = place * duration.as_secs_f64();
+                println!("seeking {:?}", place);
+                let pos = place.get() * duration.as_secs_f64();
                 sink.try_seek(Duration::from_secs_f64(pos))
                     .expect("could not seek");
-            }
-            PlayerMessage::Quit => {
-                return;
+                tx_rust
+                    .send("seek".to_string())
+                    .expect("failed to send message to rhai");
             }
             PlayerMessage::GetPos(mut call_back) => {
                 let pos = sink.get_pos();
-                let f64_pos = pos.as_secs_f64() / duration.as_secs_f64();
-                call_back(f64_pos);
+                let seek_pos = SeekPos::from_secs_percent(pos.as_secs_f64(), duration);
+                call_back(seek_pos);
+            }
+            PlayerMessage::Paus => {
+                println!("paused");
+                sink.pause();
+                tx_rust
+                    .send("paus".to_string())
+                    .expect("failed to send message to rhai");
+            }
+            PlayerMessage::Next => {
+                println!("next");
+                println!("not yet working");
+                tx_rust
+                    .send("next".to_string())
+                    .expect("failed to send message to rhai");
+            }
+            PlayerMessage::Prev => {
+                println!("prev");
+                println!("not yet working");
+                tx_rust
+                    .send("prev".to_string())
+                    .expect("failed to send message to rhai");
             }
         }
     }
