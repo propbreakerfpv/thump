@@ -6,7 +6,6 @@ use std::{
         mpsc::{channel, Receiver, Sender},
         Arc, Mutex,
     },
-    thread::sleep,
     time::Duration,
 };
 
@@ -55,6 +54,8 @@ enum Message {
     Prev,
     SeekUpdate,
     SeekChanged(SeekPos),
+    Seeking,
+    DoneSeeking,
 }
 
 #[derive(Debug)]
@@ -62,6 +63,7 @@ struct State {
     player_tx: Sender<PlayerMessage>,
     playing: bool,
     seek_value: Arc<Mutex<SeekPos>>,
+    seeking: bool
 }
 
 impl State {
@@ -114,10 +116,12 @@ impl State {
                 player_tx: tx,
                 playing: false,
                 seek_value,
+                seeking: false,
             },
             Task::none(),
         )
     }
+
     fn update(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::Play => {
@@ -166,6 +170,14 @@ impl State {
                     .expect("failed to send getPos message");
                 Task::none()
             }
+            Message::Seeking => {
+                self.seeking = true;
+                Task::none()
+            }
+            Message::DoneSeeking => {
+                self.seeking = false;
+                Task::none()
+            }
         }
     }
     fn view(&self) -> Element<Message> {
@@ -174,14 +186,18 @@ impl State {
             // seek_bar(*self.seek_value.lock().expect("mutex failed to lock")),
             seeker::seeker(
                 *self.seek_value.lock().expect("mutex failed to lock"),
-                self.player_tx.clone()
+                self.player_tx.clone(),
             )
         ]
         .into()
     }
     fn subscription(&self) -> Subscription<Message> {
-        let tick = time::every(Duration::from_millis(100)).map(|_| Message::SeekUpdate);
-        tick
+        if ! self.seeking {
+            let tick = time::every(Duration::from_millis(100)).map(|_| Message::SeekUpdate);
+            tick
+        } else {
+            Subscription::none()
+        }
     }
 }
 

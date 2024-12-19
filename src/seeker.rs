@@ -9,7 +9,7 @@ use iced::{
     Color, Element, Point, Rectangle, Renderer, Size, Theme,
 };
 
-use crate::{PlayerMessage, SEEK_DEVIDER};
+use crate::{Message, PlayerMessage, SEEK_DEVIDER};
 
 #[derive(Debug, Clone, Copy)]
 pub struct SeekPos {
@@ -59,7 +59,8 @@ impl SeekPos {
 }
 
 impl Seeker {
-    fn new(seeker_pos: SeekPos, player_tx: Sender<PlayerMessage>) -> Seeker {
+    fn new(seeker_pos: SeekPos, player_tx: Sender<PlayerMessage>) -> Seeker 
+    {
         Seeker {
             seeker_pos,
             curson_pos: Point::new(0.0, 0.0),
@@ -72,7 +73,7 @@ pub fn seeker(seeker_pos: SeekPos, player_tx: Sender<PlayerMessage>) -> Seeker {
     Seeker::new(seeker_pos, player_tx)
 }
 
-impl<M, T, R> Widget<M, T, R> for Seeker
+impl<T, R> Widget<Message, T, R> for Seeker
 where
     R: renderer::Renderer,
 {
@@ -166,7 +167,7 @@ where
         _cursor: iced::advanced::mouse::Cursor,
         _renderer: &R,
         _clipboard: &mut dyn iced::advanced::Clipboard,
-        _shell: &mut iced::advanced::Shell<'_, M>,
+        shell: &mut iced::advanced::Shell<'_, Message>,
         _viewport: &iced::Rectangle,
     ) -> iced::advanced::graphics::core::event::Status {
         let state: &mut SeekerState = state.state.downcast_mut();
@@ -176,7 +177,7 @@ where
                 self.curson_pos = position;
                 if bounds.contains(position) && state.mouse_held_down {
                     self.seeker_pos = SeekPos::from_range((self.curson_pos.x - bounds.x) as f64, 200.0);
-                    self.player_tx.send(PlayerMessage::Seek(self.seeker_pos)).expect("failed to send Seek message");
+                    // self.player_tx.send(PlayerMessage::Seek(self.seeker_pos)).expect("failed to send Seek message");
                     Status::Captured
                 } else {
                     Status::Ignored
@@ -186,14 +187,20 @@ where
                 let bounds = layout.bounds();
                 state.mouse_held_down = true;
                 if bounds.contains(self.curson_pos) {
+                    shell.publish(Message::Seeking);
                     self.seeker_pos = SeekPos::from_range((self.curson_pos.x - bounds.x) as f64, 200.0);
-                    self.player_tx.send(PlayerMessage::Seek(self.seeker_pos)).expect("failed to send Seek message");
+                    // self.player_tx.send(PlayerMessage::Seek(self.seeker_pos)).expect("failed to send Seek message");
                     Status::Captured
                 } else {
                     Status::Ignored
                 }
             }
             iced::Event::Mouse(iced::mouse::Event::ButtonReleased(iced::mouse::Button::Left)) => {
+                let bounds = layout.bounds();
+                shell.publish(Message::DoneSeeking);
+                if bounds.contains(self.curson_pos) {
+                    self.player_tx.send(PlayerMessage::Seek(self.seeker_pos)).expect("failed to send Seek message");
+                }
                 state.mouse_held_down = false;
                 Status::Ignored
             }
@@ -218,12 +225,12 @@ where
         _layout: iced::advanced::Layout<'_>,
         _renderer: &R,
         _translation: iced::Vector,
-    ) -> Option<iced::advanced::overlay::Element<'a, M, T, R>> {
+    ) -> Option<iced::advanced::overlay::Element<'a, Message, T, R>> {
         None
     }
 }
 
-impl<'a, M, T, R> From<Seeker> for Element<'a, M, T, R>
+impl<'a, T, R> From<Seeker> for Element<'a, Message, T, R>
 where
     R: renderer::Renderer,
 {
