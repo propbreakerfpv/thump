@@ -1,24 +1,19 @@
 use std::{
-    fs::File,
-    io::BufReader,
-    process::exit,
-    sync::{
+    fs::{self, File}, io::BufReader, path::PathBuf, process::exit, sync::{
         mpsc::{channel, Receiver, Sender},
         Arc, Mutex,
-    },
-    time::Duration,
+    }, time::Duration
 };
 
 use iced::{
-    time,
-    widget::{button, column, row, slider, svg},
-    Element, Subscription, Task,
+    advanced::Widget, time, widget::{button, column, container, row, slider, svg, text}, Element, Subscription, Task
 };
 use rhai::Engine;
 use rodio::{Decoder, OutputStream, Sink, Source};
 use seeker::{SeekPos, Seeker};
 
 mod seeker;
+mod song;
 
 const SEEK_DEVIDER: i32 = 1000000;
 
@@ -46,6 +41,7 @@ enum PlayerMessage {
     GetPos(Box<dyn FnMut(SeekPos) + Send>),
 }
 
+
 #[derive(Debug, Clone, Copy)]
 enum Message {
     Play,
@@ -63,8 +59,17 @@ struct State {
     player_tx: Sender<PlayerMessage>,
     playing: bool,
     seek_value: Arc<Mutex<SeekPos>>,
-    seeking: bool
+    seeking: bool,
+    songs: Vec<Song>,
 }
+
+#[derive(Debug)]
+struct Song {
+    name: String,
+    artist: String,
+    path: PathBuf,
+}
+
 
 impl State {
     fn new() -> (State, Task<Message>) {
@@ -83,7 +88,7 @@ impl State {
         print("from script");
         loop {
             let value = get();
-            print(`got ${value}`);
+            // print(`got ${value}`);
         }
         "#,
                 )
@@ -92,24 +97,18 @@ impl State {
 
         tokio::spawn(play_manager(rx, tx_rust));
 
-        // manage seeker
-        // let seek_value = Mutex::new(0.0);
+
         let seek_value = Arc::new(Mutex::new(SeekPos::from_range(0.0, 1.0)));
-        let seeker_value = seek_value.clone();
-        let seeker_tx = tx.clone();
-        // tokio::spawn(async move {
-        //     for _ in 0.. {
-        //         let sv = seeker_value.clone();
-        //         seeker_tx
-        //             .send(PlayerMessage::GetPos(Box::new(move |pos| {
-        //                 let mut sv = sv.lock().expect("failed to get mut arc");
-        //                 *sv = ((pos * SEEK_DEVIDER as f64) as u64) as f64;
-        //                 println!("just changed seek to: {}", sv);
-        //             })))
-        //             .expect("failed to send getpos message");
-        //         sleep(Duration::from_millis(50));
-        //     }
-        // });
+
+        let songs = fs::read_dir("assets/songs").expect("failed to read dir");
+        let songs = songs.map(|song| {
+            let song = song.expect("song is error");
+            Song {
+                name: song.file_name().to_str().expect("failed to turn os string into str").to_string(),
+                artist: String::new(),
+                path: song.path(),
+            }
+        }).collect();
 
         (
             State {
@@ -117,6 +116,7 @@ impl State {
                 playing: false,
                 seek_value,
                 seeking: false,
+                songs,
             },
             Task::none(),
         )
@@ -161,13 +161,17 @@ impl State {
             }
             Message::SeekUpdate => {
                 let sv = self.seek_value.clone();
-                self.player_tx
+                match self.player_tx
                     .send(PlayerMessage::GetPos(Box::new(move |pos| {
                         // println!("get pos from player {:?}", pos);
                         let mut seek_value = sv.lock().unwrap();
                         *seek_value = pos;
-                    })))
-                    .expect("failed to send getPos message");
+                    }))) {
+                        Ok(_) => {}
+                        Err(e) => {
+                            println!("error sending seekupdate {}", e);
+                        }
+                    }
                 Task::none()
             }
             Message::Seeking => {
@@ -187,7 +191,8 @@ impl State {
             seeker::seeker(
                 *self.seek_value.lock().expect("mutex failed to lock"),
                 self.player_tx.clone(),
-            )
+            ),
+            song_browser(&self.songs)
         ]
         .into()
     }
@@ -199,6 +204,12 @@ impl State {
             Subscription::none()
         }
     }
+}
+
+fn song_browser(songs: &Vec<Song>) -> Element<'static, Message> {
+    column(songs.into_iter().map(|s| {
+        text(s.name.to_string()).into()
+    })).into()
 }
 
 fn play_controls(playing: bool) -> Element<'static, Message> {
@@ -226,7 +237,7 @@ async fn play_manager(rx: Receiver<PlayerMessage>, tx_rust: Sender<String>) {
         OutputStream::try_default().expect("could not create default OutputStream");
     let sink = Sink::try_new(&stream_handle).expect("could not create new Sink");
 
-    let file = BufReader::new(File::open("assets/test.flac").expect("failed to load test file"));
+    let file = BufReader::new(File::open("assets/songs/test.flac").expect("failed to load test file"));
     let source = Decoder::new(file).expect("failed to create decoder from test file");
     let duration = source
         .total_duration()
