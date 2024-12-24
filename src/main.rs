@@ -6,21 +6,46 @@ use std::{
 };
 
 use iced::{
-    advanced::Widget, time, widget::{button, column, container, row, slider, svg, text}, Element, Subscription, Task
+    time, widget::{button, column, row, scrollable, svg, text}, Element, Subscription, Task
 };
+use lofty::{file::TaggedFileExt, read_from_path, tag::TagItem};
 use rhai::Engine;
 use rodio::{Decoder, OutputStream, Sink, Source};
-use seeker::{SeekPos, Seeker};
+use seeker::SeekPos;
 
 mod seeker;
-mod song;
-
-const SEEK_DEVIDER: i32 = 1000000;
 
 const NEXT_ICON: &[u8; 1714] = include_bytes!("../assets/next.svg");
 const PREV_ICON: &[u8; 1707] = include_bytes!("../assets/prev.svg");
 const PLAY_ICON: &[u8; 859] = include_bytes!("../assets/play.svg");
 const PAUSE_ICON: &[u8; 1624] = include_bytes!("../assets/pause.svg");
+
+#[derive(Debug, Clone)]
+pub struct Song {
+    name: Option<String>,
+    album_artist: Option<String>,
+    track_artist: Option<String>,
+    recording_date: Option<String>,
+    track_number: Option<i32>,
+    disc_number: Option<i32>,
+    album_name: Option<String>,
+    path: PathBuf,
+}
+
+impl Song {
+    fn new(path: PathBuf) -> Song {
+        Song {
+            path,
+            name: None,
+            album_artist: None,
+            track_artist: None,
+            recording_date: None,
+            track_number: None,
+            disc_number: None,
+            album_name: None,
+        }
+    }
+}
 
 #[tokio::main]
 async fn main() {
@@ -39,10 +64,11 @@ enum PlayerMessage {
     Prev,
     Seek(SeekPos),
     GetPos(Box<dyn FnMut(SeekPos) + Send>),
+    PlaySong(Song),
 }
 
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 enum Message {
     Play,
     Pause,
@@ -52,6 +78,7 @@ enum Message {
     SeekChanged(SeekPos),
     Seeking,
     DoneSeeking,
+    SongSelected(Song),
 }
 
 #[derive(Debug)]
@@ -62,14 +89,120 @@ struct State {
     seeking: bool,
     songs: Vec<Song>,
 }
-
-#[derive(Debug)]
-struct Song {
-    name: String,
-    artist: String,
-    path: PathBuf,
+fn to_string<T: ToString>(t: T) -> String {
+    t.to_string()
 }
 
+fn fold_songs(mut song: Song, tag: &TagItem) -> Song {
+    let tag = tag.clone();
+    match tag.clone().into_key() {
+        lofty::tag::ItemKey::AlbumTitle => song.album_name = tag.into_value().into_string(),
+        lofty::tag::ItemKey::SetSubtitle => {}
+        lofty::tag::ItemKey::ShowName => {}
+        lofty::tag::ItemKey::ContentGroup => {}
+        lofty::tag::ItemKey::TrackTitle => song.name = tag.into_value().into_string(),
+        lofty::tag::ItemKey::TrackSubtitle => {}
+        lofty::tag::ItemKey::OriginalAlbumTitle => {}
+        lofty::tag::ItemKey::OriginalArtist => {}
+        lofty::tag::ItemKey::OriginalLyricist => {}
+        lofty::tag::ItemKey::AlbumTitleSortOrder => {}
+        lofty::tag::ItemKey::AlbumArtistSortOrder => {}
+        lofty::tag::ItemKey::TrackTitleSortOrder => {}
+        lofty::tag::ItemKey::TrackArtistSortOrder => {}
+        lofty::tag::ItemKey::ShowNameSortOrder => {}
+        lofty::tag::ItemKey::ComposerSortOrder => {}
+        lofty::tag::ItemKey::AlbumArtist => song.album_artist = tag.into_value().into_string(),
+        lofty::tag::ItemKey::TrackArtist => song.track_artist = tag.into_value().into_string(),
+        lofty::tag::ItemKey::Arranger => {}
+        lofty::tag::ItemKey::Writer => {}
+        lofty::tag::ItemKey::Composer => {}
+        lofty::tag::ItemKey::Conductor => {}
+        lofty::tag::ItemKey::Director => {}
+        lofty::tag::ItemKey::Engineer => {}
+        lofty::tag::ItemKey::Lyricist => {}
+        lofty::tag::ItemKey::MixDj => {}
+        lofty::tag::ItemKey::MixEngineer => {}
+        lofty::tag::ItemKey::MusicianCredits => {}
+        lofty::tag::ItemKey::Performer => {}
+        lofty::tag::ItemKey::Producer => {}
+        lofty::tag::ItemKey::Publisher => {}
+        lofty::tag::ItemKey::Label => {}
+        lofty::tag::ItemKey::InternetRadioStationName => {}
+        lofty::tag::ItemKey::InternetRadioStationOwner => {}
+        lofty::tag::ItemKey::Remixer => {}
+        lofty::tag::ItemKey::DiscNumber => song.disc_number = tag.into_value().into_string().map(|x| x.parse().expect("failed to parse value")),
+        lofty::tag::ItemKey::DiscTotal => {}
+        lofty::tag::ItemKey::TrackNumber => song.track_number = tag.into_value().into_string().map(|x| x.parse().expect("failed to parse value")),
+        lofty::tag::ItemKey::TrackTotal => {}
+        lofty::tag::ItemKey::Popularimeter => {}
+        lofty::tag::ItemKey::ParentalAdvisory => {}
+        lofty::tag::ItemKey::RecordingDate => song.recording_date = tag.into_value().into_string(),
+        lofty::tag::ItemKey::Year => {}
+        lofty::tag::ItemKey::ReleaseDate => {}
+        lofty::tag::ItemKey::OriginalReleaseDate => {}
+        lofty::tag::ItemKey::Isrc => {}
+        lofty::tag::ItemKey::Barcode => {}
+        lofty::tag::ItemKey::CatalogNumber => {}
+        lofty::tag::ItemKey::Work => {}
+        lofty::tag::ItemKey::Movement => {}
+        lofty::tag::ItemKey::MovementNumber => {}
+        lofty::tag::ItemKey::MovementTotal => {}
+        lofty::tag::ItemKey::MusicBrainzRecordingId => {}
+        lofty::tag::ItemKey::MusicBrainzTrackId => {}
+        lofty::tag::ItemKey::MusicBrainzReleaseId => {}
+        lofty::tag::ItemKey::MusicBrainzReleaseGroupId => {}
+        lofty::tag::ItemKey::MusicBrainzArtistId => {}
+        lofty::tag::ItemKey::MusicBrainzReleaseArtistId => {}
+        lofty::tag::ItemKey::MusicBrainzWorkId => {}
+        lofty::tag::ItemKey::FlagCompilation => {}
+        lofty::tag::ItemKey::FlagPodcast => {}
+        lofty::tag::ItemKey::FileType => {}
+        lofty::tag::ItemKey::FileOwner => {}
+        lofty::tag::ItemKey::TaggingTime => {}
+        lofty::tag::ItemKey::Length => {}
+        lofty::tag::ItemKey::OriginalFileName => {}
+        lofty::tag::ItemKey::OriginalMediaType => {}
+        lofty::tag::ItemKey::EncodedBy => {}
+        lofty::tag::ItemKey::EncoderSoftware => {}
+        lofty::tag::ItemKey::EncoderSettings => {}
+        lofty::tag::ItemKey::EncodingTime => {}
+        lofty::tag::ItemKey::ReplayGainAlbumGain => {}
+        lofty::tag::ItemKey::ReplayGainAlbumPeak => {}
+        lofty::tag::ItemKey::ReplayGainTrackGain => {}
+        lofty::tag::ItemKey::ReplayGainTrackPeak => {}
+        lofty::tag::ItemKey::AudioFileUrl => {}
+        lofty::tag::ItemKey::AudioSourceUrl => {}
+        lofty::tag::ItemKey::CommercialInformationUrl => {}
+        lofty::tag::ItemKey::CopyrightUrl => {}
+        lofty::tag::ItemKey::TrackArtistUrl => {}
+        lofty::tag::ItemKey::RadioStationUrl => {}
+        lofty::tag::ItemKey::PaymentUrl => {}
+        lofty::tag::ItemKey::PublisherUrl => {}
+        lofty::tag::ItemKey::Genre => {}
+        lofty::tag::ItemKey::InitialKey => {}
+        lofty::tag::ItemKey::Color => {}
+        lofty::tag::ItemKey::Mood => {}
+        lofty::tag::ItemKey::Bpm => {}
+        lofty::tag::ItemKey::IntegerBpm => {}
+        lofty::tag::ItemKey::CopyrightMessage => {}
+        lofty::tag::ItemKey::License => {}
+        lofty::tag::ItemKey::PodcastDescription => {}
+        lofty::tag::ItemKey::PodcastSeriesCategory => {}
+        lofty::tag::ItemKey::PodcastUrl => {}
+        lofty::tag::ItemKey::PodcastGlobalUniqueId => {}
+        lofty::tag::ItemKey::PodcastKeywords => {}
+        lofty::tag::ItemKey::Comment => {}
+        lofty::tag::ItemKey::Description => {}
+        lofty::tag::ItemKey::Language => {}
+        lofty::tag::ItemKey::Script => {}
+        lofty::tag::ItemKey::Lyrics => {}
+        lofty::tag::ItemKey::AppleXid => {}
+        lofty::tag::ItemKey::AppleId3v2ContentGroup => {}
+        lofty::tag::ItemKey::Unknown(_) => {}
+        _ => {}
+    }
+    song
+}
 
 impl State {
     fn new() -> (State, Task<Message>) {
@@ -103,11 +236,13 @@ impl State {
         let songs = fs::read_dir("assets/songs").expect("failed to read dir");
         let songs = songs.map(|song| {
             let song = song.expect("song is error");
-            Song {
-                name: song.file_name().to_str().expect("failed to turn os string into str").to_string(),
-                artist: String::new(),
-                path: song.path(),
-            }
+            let path = song.path();
+            let tagged_file = read_from_path(path.clone()).expect("failed to read tagged_file");
+            let a = tagged_file.primary_tag();
+            a
+                .expect("no tag?")
+                .items()
+                .fold(Song::new(path.clone()), fold_songs)
         }).collect();
 
         (
@@ -182,6 +317,11 @@ impl State {
                 self.seeking = false;
                 Task::none()
             }
+            Message::SongSelected(song) => {
+                println!("selected song {:?}", song.name);
+                self.player_tx.send(PlayerMessage::PlaySong(song)).expect("failed to send playsong message");
+                Task::done(Message::Play)
+            },
         }
     }
     fn view(&self) -> Element<Message> {
@@ -198,8 +338,8 @@ impl State {
     }
     fn subscription(&self) -> Subscription<Message> {
         if ! self.seeking {
-            let tick = time::every(Duration::from_millis(100)).map(|_| Message::SeekUpdate);
-            tick
+            
+            time::every(Duration::from_millis(100)).map(|_| Message::SeekUpdate)
         } else {
             Subscription::none()
         }
@@ -207,9 +347,24 @@ impl State {
 }
 
 fn song_browser(songs: &Vec<Song>) -> Element<'static, Message> {
-    column(songs.into_iter().map(|s| {
-        text(s.name.to_string()).into()
-    })).into()
+    let name_width = 200.0;
+    let artist_width = 150.0;
+    // clones are not good
+    scrollable(
+        column(songs.into_iter().map(move |s| {
+            song(s.clone(), name_width, artist_width)
+        }))
+    ).into()
+}
+
+fn song(song: Song, name_width: f32, artist_width: f32) -> Element<'static, Message> {
+    button(row![
+            text(song.name.as_ref().expect("no song name").clone()).width(name_width),
+            text(song.track_artist.as_ref().expect("no song name").clone()).width(artist_width),
+        ])
+        .on_press_with(move ||{
+            Message::SongSelected(song.clone())
+        }).into()
 }
 
 fn play_controls(playing: bool) -> Element<'static, Message> {
@@ -239,7 +394,7 @@ async fn play_manager(rx: Receiver<PlayerMessage>, tx_rust: Sender<String>) {
 
     let file = BufReader::new(File::open("assets/songs/test.flac").expect("failed to load test file"));
     let source = Decoder::new(file).expect("failed to create decoder from test file");
-    let duration = source
+    let mut duration = source
         .total_duration()
         .expect("failed to get souce duration");
     sink.append(source);
@@ -296,6 +451,15 @@ async fn play_manager(rx: Receiver<PlayerMessage>, tx_rust: Sender<String>) {
                     .send("prev".to_string())
                     .expect("failed to send message to rhai");
             }
+            PlayerMessage::PlaySong(song) => {
+                let file = BufReader::new(File::open(song.path).expect("failed to load test file"));
+                let source = Decoder::new(file).expect("failed to create decoder from test file");
+                duration = source
+                    .total_duration()
+                    .expect("failed to get souce duration");
+                sink.append(source);
+                // sink.skip_one();
+            },
         }
     }
 }

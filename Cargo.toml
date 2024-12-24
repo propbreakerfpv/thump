@@ -11,6 +11,7 @@ license = "GPL-3.0-only"
 [dependencies]
 iced = { version = "0.13.1", features = ["svg", "advanced", "canvas", "tokio"] }
 lazy_static = "1.5.0"
+lofty = "0.21.1"
 rhai = { version = "1.20.1", features = [] }
 rodio = { version = "0.20.1", features = ["symphonia-flac"] }
 symphonia = { version = "0.5.4", features = ["all", "opt-simd"] }

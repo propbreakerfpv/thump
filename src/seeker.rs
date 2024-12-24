@@ -1,15 +1,13 @@
-use std::{any::TypeId, hash::Hash, ops::{AddAssign, Deref}, sync::mpsc::Sender, thread::sleep, time::Duration};
+use std::{sync::mpsc::Sender, time::Duration};
 
 use iced::{
-    advanced::{graphics::futures::subscription, layout::Node, renderer, Widget},
+    advanced::{layout::Node, renderer, Widget},
     border,
     event::Status,
-    futures::StreamExt,
-    widget::canvas,
-    Color, Element, Point, Rectangle, Renderer, Size, Theme,
+    Color, Element, Point, Rectangle, Size,
 };
 
-use crate::{Message, PlayerMessage, SEEK_DEVIDER};
+use crate::{Message, PlayerMessage};
 
 #[derive(Debug, Clone, Copy)]
 pub struct SeekPos {
@@ -30,9 +28,9 @@ pub struct SeekerState {
 }
 
 
-impl Into<f64> for SeekPos {
-    fn into(self) -> f64 {
-        self.seek_pos
+impl From<SeekPos> for f64 {
+    fn from(val: SeekPos) -> Self {
+        val.seek_pos
     }
 }
 // impl Into<f32> for SeekPos {
@@ -230,7 +228,7 @@ where
     }
 }
 
-impl<'a, T, R> From<Seeker> for Element<'a, Message, T, R>
+impl<T, R> From<Seeker> for Element<'_, Message, T, R>
 where
     R: renderer::Renderer,
 {
