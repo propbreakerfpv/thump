@@ -9,6 +9,7 @@ use iced::{
 
 use crate::{Message, PlayerMessage};
 
+/// universal way of representing a seekers position
 #[derive(Debug, Clone, Copy)]
 pub struct SeekPos {
     /// the position in the current track as map to 0 to 1
@@ -46,19 +47,20 @@ impl SeekPos {
             seek_pos: percent / duration.as_secs_f64(),
         }
     }
+    /// create a `SeekPos` from a `f64` with a range from 0 to `range_max`
     pub fn from_range(pos: f64, range_max: f64) -> SeekPos {
         SeekPos {
             seek_pos: pos / range_max,
         }
     }
+    /// get the seek position
     pub fn get(&self) -> f64 {
         self.seek_pos
     }
 }
 
 impl Seeker {
-    fn new(seeker_pos: SeekPos, player_tx: Sender<PlayerMessage>) -> Seeker 
-    {
+    fn new(seeker_pos: SeekPos, player_tx: Sender<PlayerMessage>) -> Seeker {
         Seeker {
             seeker_pos,
             curson_pos: Point::new(0.0, 0.0),
@@ -66,7 +68,9 @@ impl Seeker {
         }
     }
 }
+/// get the seek position
 
+/// the seeker widget
 pub fn seeker(seeker_pos: SeekPos, player_tx: Sender<PlayerMessage>) -> Seeker {
     Seeker::new(seeker_pos, player_tx)
 }
@@ -197,7 +201,8 @@ where
                 let bounds = layout.bounds();
                 shell.publish(Message::DoneSeeking);
                 if bounds.contains(self.curson_pos) {
-                    self.player_tx.send(PlayerMessage::Seek(self.seeker_pos)).expect("failed to send Seek message");
+                    shell.publish(Message::SeekChanged(self.seeker_pos));
+                    // self.player_tx.send(PlayerMessage::Seek(self.seeker_pos)).expect("failed to send Seek message");
                 }
                 state.mouse_held_down = false;
                 Status::Ignored

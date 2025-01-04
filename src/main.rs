@@ -1,19 +1,28 @@
 use std::{
-    fs::{self, File}, io::BufReader, path::PathBuf, process::exit, sync::{
+    collections::VecDeque,
+    fs::File,
+    io::BufReader,
+    path::PathBuf,
+    process::exit,
+    sync::{
         mpsc::{channel, Receiver, Sender},
         Arc, Mutex,
-    }, time::Duration
+    },
+    time::Duration,
 };
 
 use iced::{
-    time, widget::{button, column, row, scrollable, svg, text}, Element, Subscription, Task
+    border::top, futures::Stream, time, widget::{button, column, row, scrollable, svg, text}, Element, Subscription, Task
 };
-use lofty::{file::TaggedFileExt, read_from_path, tag::TagItem};
+use play_manager::PlayerManager;
+use read_files::search_dir;
 use rhai::Engine;
 use rodio::{Decoder, OutputStream, Sink, Source};
 use seeker::SeekPos;
 
+mod read_files;
 mod seeker;
+mod play_manager;
 
 const NEXT_ICON: &[u8; 1714] = include_bytes!("../assets/next.svg");
 const PREV_ICON: &[u8; 1707] = include_bytes!("../assets/prev.svg");
@@ -66,7 +75,7 @@ enum PlayerMessage {
     GetPos(Box<dyn FnMut(SeekPos) + Send>),
     PlaySong(Song),
 }
-
+unsafe impl Send for PlayerMessage { }
 
 #[derive(Debug, Clone)]
 enum Message {
@@ -84,124 +93,14 @@ enum Message {
 #[derive(Debug)]
 struct State {
     player_tx: Sender<PlayerMessage>,
+    tx_rust: Sender<String>,
+    player_manager: PlayerManager,
     playing: bool,
-    seek_value: Arc<Mutex<SeekPos>>,
+    seek_value: SeekPos,
     seeking: bool,
     songs: Vec<Song>,
-}
-fn to_string<T: ToString>(t: T) -> String {
-    t.to_string()
-}
-
-fn fold_songs(mut song: Song, tag: &TagItem) -> Song {
-    let tag = tag.clone();
-    match tag.clone().into_key() {
-        lofty::tag::ItemKey::AlbumTitle => song.album_name = tag.into_value().into_string(),
-        lofty::tag::ItemKey::SetSubtitle => {}
-        lofty::tag::ItemKey::ShowName => {}
-        lofty::tag::ItemKey::ContentGroup => {}
-        lofty::tag::ItemKey::TrackTitle => song.name = tag.into_value().into_string(),
-        lofty::tag::ItemKey::TrackSubtitle => {}
-        lofty::tag::ItemKey::OriginalAlbumTitle => {}
-        lofty::tag::ItemKey::OriginalArtist => {}
-        lofty::tag::ItemKey::OriginalLyricist => {}
-        lofty::tag::ItemKey::AlbumTitleSortOrder => {}
-        lofty::tag::ItemKey::AlbumArtistSortOrder => {}
-        lofty::tag::ItemKey::TrackTitleSortOrder => {}
-        lofty::tag::ItemKey::TrackArtistSortOrder => {}
-        lofty::tag::ItemKey::ShowNameSortOrder => {}
-        lofty::tag::ItemKey::ComposerSortOrder => {}
-        lofty::tag::ItemKey::AlbumArtist => song.album_artist = tag.into_value().into_string(),
-        lofty::tag::ItemKey::TrackArtist => song.track_artist = tag.into_value().into_string(),
-        lofty::tag::ItemKey::Arranger => {}
-        lofty::tag::ItemKey::Writer => {}
-        lofty::tag::ItemKey::Composer => {}
-        lofty::tag::ItemKey::Conductor => {}
-        lofty::tag::ItemKey::Director => {}
-        lofty::tag::ItemKey::Engineer => {}
-        lofty::tag::ItemKey::Lyricist => {}
-        lofty::tag::ItemKey::MixDj => {}
-        lofty::tag::ItemKey::MixEngineer => {}
-        lofty::tag::ItemKey::MusicianCredits => {}
-        lofty::tag::ItemKey::Performer => {}
-        lofty::tag::ItemKey::Producer => {}
-        lofty::tag::ItemKey::Publisher => {}
-        lofty::tag::ItemKey::Label => {}
-        lofty::tag::ItemKey::InternetRadioStationName => {}
-        lofty::tag::ItemKey::InternetRadioStationOwner => {}
-        lofty::tag::ItemKey::Remixer => {}
-        lofty::tag::ItemKey::DiscNumber => song.disc_number = tag.into_value().into_string().map(|x| x.parse().expect("failed to parse value")),
-        lofty::tag::ItemKey::DiscTotal => {}
-        lofty::tag::ItemKey::TrackNumber => song.track_number = tag.into_value().into_string().map(|x| x.parse().expect("failed to parse value")),
-        lofty::tag::ItemKey::TrackTotal => {}
-        lofty::tag::ItemKey::Popularimeter => {}
-        lofty::tag::ItemKey::ParentalAdvisory => {}
-        lofty::tag::ItemKey::RecordingDate => song.recording_date = tag.into_value().into_string(),
-        lofty::tag::ItemKey::Year => {}
-        lofty::tag::ItemKey::ReleaseDate => {}
-        lofty::tag::ItemKey::OriginalReleaseDate => {}
-        lofty::tag::ItemKey::Isrc => {}
-        lofty::tag::ItemKey::Barcode => {}
-        lofty::tag::ItemKey::CatalogNumber => {}
-        lofty::tag::ItemKey::Work => {}
-        lofty::tag::ItemKey::Movement => {}
-        lofty::tag::ItemKey::MovementNumber => {}
-        lofty::tag::ItemKey::MovementTotal => {}
-        lofty::tag::ItemKey::MusicBrainzRecordingId => {}
-        lofty::tag::ItemKey::MusicBrainzTrackId => {}
-        lofty::tag::ItemKey::MusicBrainzReleaseId => {}
-        lofty::tag::ItemKey::MusicBrainzReleaseGroupId => {}
-        lofty::tag::ItemKey::MusicBrainzArtistId => {}
-        lofty::tag::ItemKey::MusicBrainzReleaseArtistId => {}
-        lofty::tag::ItemKey::MusicBrainzWorkId => {}
-        lofty::tag::ItemKey::FlagCompilation => {}
-        lofty::tag::ItemKey::FlagPodcast => {}
-        lofty::tag::ItemKey::FileType => {}
-        lofty::tag::ItemKey::FileOwner => {}
-        lofty::tag::ItemKey::TaggingTime => {}
-        lofty::tag::ItemKey::Length => {}
-        lofty::tag::ItemKey::OriginalFileName => {}
-        lofty::tag::ItemKey::OriginalMediaType => {}
-        lofty::tag::ItemKey::EncodedBy => {}
-        lofty::tag::ItemKey::EncoderSoftware => {}
-        lofty::tag::ItemKey::EncoderSettings => {}
-        lofty::tag::ItemKey::EncodingTime => {}
-        lofty::tag::ItemKey::ReplayGainAlbumGain => {}
-        lofty::tag::ItemKey::ReplayGainAlbumPeak => {}
-        lofty::tag::ItemKey::ReplayGainTrackGain => {}
-        lofty::tag::ItemKey::ReplayGainTrackPeak => {}
-        lofty::tag::ItemKey::AudioFileUrl => {}
-        lofty::tag::ItemKey::AudioSourceUrl => {}
-        lofty::tag::ItemKey::CommercialInformationUrl => {}
-        lofty::tag::ItemKey::CopyrightUrl => {}
-        lofty::tag::ItemKey::TrackArtistUrl => {}
-        lofty::tag::ItemKey::RadioStationUrl => {}
-        lofty::tag::ItemKey::PaymentUrl => {}
-        lofty::tag::ItemKey::PublisherUrl => {}
-        lofty::tag::ItemKey::Genre => {}
-        lofty::tag::ItemKey::InitialKey => {}
-        lofty::tag::ItemKey::Color => {}
-        lofty::tag::ItemKey::Mood => {}
-        lofty::tag::ItemKey::Bpm => {}
-        lofty::tag::ItemKey::IntegerBpm => {}
-        lofty::tag::ItemKey::CopyrightMessage => {}
-        lofty::tag::ItemKey::License => {}
-        lofty::tag::ItemKey::PodcastDescription => {}
-        lofty::tag::ItemKey::PodcastSeriesCategory => {}
-        lofty::tag::ItemKey::PodcastUrl => {}
-        lofty::tag::ItemKey::PodcastGlobalUniqueId => {}
-        lofty::tag::ItemKey::PodcastKeywords => {}
-        lofty::tag::ItemKey::Comment => {}
-        lofty::tag::ItemKey::Description => {}
-        lofty::tag::ItemKey::Language => {}
-        lofty::tag::ItemKey::Script => {}
-        lofty::tag::ItemKey::Lyrics => {}
-        lofty::tag::ItemKey::AppleXid => {}
-        lofty::tag::ItemKey::AppleId3v2ContentGroup => {}
-        lofty::tag::ItemKey::Unknown(_) => {}
-        _ => {}
-    }
-    song
+    now_playing: Option<Song>,
+    player_que: VecDeque<Song>,
 }
 
 impl State {
@@ -228,85 +127,90 @@ impl State {
                 .expect("failed to run script");
         });
 
-        tokio::spawn(play_manager(rx, tx_rust));
+        // tokio::spawn(play_manager(rx, tx_rust));
+
+        let seek_value = SeekPos::from_range(0.0, 1.0);
+
+        let songs = search_dir("/Users/jonas/Soulseek Downloads/complete");
+        songs.iter().for_each(|s| {
+            println!("song: {:?} {:?}", s.name, s.track_artist);
+        });
 
 
-        let seek_value = Arc::new(Mutex::new(SeekPos::from_range(0.0, 1.0)));
-
-        let songs = fs::read_dir("assets/songs").expect("failed to read dir");
-        let songs = songs.map(|song| {
-            let song = song.expect("song is error");
-            let path = song.path();
-            let tagged_file = read_from_path(path.clone()).expect("failed to read tagged_file");
-            let a = tagged_file.primary_tag();
-            a
-                .expect("no tag?")
-                .items()
-                .fold(Song::new(path.clone()), fold_songs)
-        }).collect();
 
         (
             State {
                 player_tx: tx,
+                tx_rust,
+                player_manager: PlayerManager::new(),
                 playing: false,
                 seek_value,
                 seeking: false,
                 songs,
+                now_playing: None,
+                player_que: VecDeque::new(),
             },
-            Task::none(),
+            Task::none()
+            // Task::future(play_manager(rx, tx_rust)),
         )
     }
 
     fn update(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::Play => {
-                self.player_tx
-                    .send(PlayerMessage::Play)
-                    .expect("failed to send play message");
+                println!("playing msg received. empty: {}", self.player_manager.sink.empty());
+                self.player_manager.sink.play();
+                self.tx_rust
+                    .send("play".to_string())
+                    .expect("failed to send message to rhai");
                 self.playing = true;
                 Task::none()
             }
             Message::Pause => {
-                self.player_tx
-                    .send(PlayerMessage::Paus)
-                    .expect("failed to send paus message");
+                println!("paused");
+                self.player_manager.sink.pause();
+                self.tx_rust
+                    .send("paus".to_string())
+                    .expect("failed to send message to rhai");
                 self.playing = false;
                 Task::none()
             }
             Message::Next => {
-                self.player_tx
-                    .send(PlayerMessage::Next)
-                    .expect("failed to send next message");
+                println!("next");
+                // println!("not yet working");
+                self.player_manager.sink.skip_one();
+                self.tx_rust
+                    .send("next".to_string())
+                    .expect("failed to send message to rhai");
                 Task::none()
             }
             Message::Prev => {
-                self.player_tx
-                    .send(PlayerMessage::Prev)
-                    .expect("failed to send prev message");
+                println!("prev");
+                println!("not yet working");
+                self.tx_rust
+                    .send("prev".to_string())
+                    .expect("failed to send message to rhai");
                 Task::none()
             }
             Message::SeekChanged(val) => {
-                println!("seeking: {:?}, currently at: {:?}", val, self.seek_value);
-                self.player_tx
-                    .send(PlayerMessage::Seek(val))
-                    .expect("failed to send seek message");
-                let mut seek_value = self.seek_value.lock().unwrap();
-                *seek_value = val;
+                println!("seeking {:?}", val);
+                let pos = val.get() * self.player_manager.duration.as_secs_f64();
+                self.player_manager.sink.try_seek(Duration::from_secs_f64(pos))
+                    .expect("could not seek");
+                self.tx_rust
+                    .send("seek".to_string())
+                    .expect("failed to send message to rhai");
+                self.seek_value = val;
                 Task::none()
             }
             Message::SeekUpdate => {
-                let sv = self.seek_value.clone();
-                match self.player_tx
-                    .send(PlayerMessage::GetPos(Box::new(move |pos| {
-                        // println!("get pos from player {:?}", pos);
-                        let mut seek_value = sv.lock().unwrap();
-                        *seek_value = pos;
-                    }))) {
-                        Ok(_) => {}
-                        Err(e) => {
-                            println!("error sending seekupdate {}", e);
-                        }
-                    }
+
+                let pos = self.player_manager.sink.get_pos();
+                // println!("getpos {:?}", pos);
+                self.seek_value = SeekPos::from_secs_percent(pos.as_secs_f64(), self.player_manager.duration);
+                if self.seek_value.get() >= 0.999999 {
+                    println!("next_song");
+                }
                 Task::none()
             }
             Message::Seeking => {
@@ -318,10 +222,21 @@ impl State {
                 Task::none()
             }
             Message::SongSelected(song) => {
-                println!("selected song {:?}", song.name);
-                self.player_tx.send(PlayerMessage::PlaySong(song)).expect("failed to send playsong message");
+                let file =
+                BufReader::new(File::open(song.path.clone()).expect("failed to load test file"));
+                let source =
+                Decoder::new(file).expect("failed to create decoder from test file");
+                // self.duration = source
+                //     .total_duration()
+                //     .expect("failed to get souce duration");
+                let duration = source.total_duration().expect("failed to get source duration");
+                self.player_manager.sink.append(source);
+                // Message::SetDuration(duration)
+                // return Subscription::none().map(move |_: ()| Message::SetDuration(duration));
+                self.player_manager.duration = duration;
+                self.player_que.push_back(song);
                 Task::done(Message::Play)
-            },
+            }
         }
     }
     fn view(&self) -> Element<Message> {
@@ -329,20 +244,21 @@ impl State {
             play_controls(self.playing),
             // seek_bar(*self.seek_value.lock().expect("mutex failed to lock")),
             seeker::seeker(
-                *self.seek_value.lock().expect("mutex failed to lock"),
+                self.seek_value,
                 self.player_tx.clone(),
             ),
+            now_playing(),
             song_browser(&self.songs)
         ]
         .into()
     }
     fn subscription(&self) -> Subscription<Message> {
-        if ! self.seeking {
-            
+        let seeking = if !self.seeking {
             time::every(Duration::from_millis(100)).map(|_| Message::SeekUpdate)
         } else {
             Subscription::none()
-        }
+        };
+        Subscription::batch([seeking /* self.player_manager.player_subscription() */])
     }
 }
 
@@ -350,21 +266,25 @@ fn song_browser(songs: &Vec<Song>) -> Element<'static, Message> {
     let name_width = 200.0;
     let artist_width = 150.0;
     // clones are not good
-    scrollable(
-        column(songs.into_iter().map(move |s| {
-            song(s.clone(), name_width, artist_width)
-        }))
-    ).into()
+    scrollable(column(
+        songs
+            .into_iter()
+            .map(move |s| song(s.clone(), name_width, artist_width)),
+    ))
+    .into()
 }
 
 fn song(song: Song, name_width: f32, artist_width: f32) -> Element<'static, Message> {
     button(row![
-            text(song.name.as_ref().expect("no song name").clone()).width(name_width),
-            text(song.track_artist.as_ref().expect("no song name").clone()).width(artist_width),
-        ])
-        .on_press_with(move ||{
-            Message::SongSelected(song.clone())
-        }).into()
+        text(song.name.as_ref().expect("no song name").clone()).width(name_width),
+        text(song.track_artist.as_ref().expect("no song name").clone()).width(artist_width),
+    ])
+    .on_press_with(move || Message::SongSelected(song.clone()))
+    .into()
+}
+
+fn now_playing() -> Element<'static, Message> {
+    text("now playing").into()
 }
 
 fn play_controls(playing: bool) -> Element<'static, Message> {
@@ -385,81 +305,4 @@ fn play_controls(playing: bool) -> Element<'static, Message> {
         button(svg(next_handle).width(25).height(25)).on_press(Message::Next),
     ]
     .into()
-}
-
-async fn play_manager(rx: Receiver<PlayerMessage>, tx_rust: Sender<String>) {
-    let (_stream, stream_handle) =
-        OutputStream::try_default().expect("could not create default OutputStream");
-    let sink = Sink::try_new(&stream_handle).expect("could not create new Sink");
-
-    let file = BufReader::new(File::open("assets/songs/test.flac").expect("failed to load test file"));
-    let source = Decoder::new(file).expect("failed to create decoder from test file");
-    let mut duration = source
-        .total_duration()
-        .expect("failed to get souce duration");
-    sink.append(source);
-    sink.pause();
-
-    for msg in rx {
-        match msg {
-            PlayerMessage::Play => {
-                println!("playing");
-                sink.play();
-                tx_rust
-                    .send("play".to_string())
-                    .expect("failed to send message to rhai");
-            }
-            PlayerMessage::Stop => {
-                println!("stoped");
-                sink.pause();
-                tx_rust
-                    .send("stop".to_string())
-                    .expect("failed to send message to rhai");
-            }
-            PlayerMessage::Seek(place) => {
-                println!("seeking {:?}", place);
-                let pos = place.get() * duration.as_secs_f64();
-                sink.try_seek(Duration::from_secs_f64(pos))
-                    .expect("could not seek");
-                tx_rust
-                    .send("seek".to_string())
-                    .expect("failed to send message to rhai");
-            }
-            PlayerMessage::GetPos(mut call_back) => {
-                let pos = sink.get_pos();
-                let seek_pos = SeekPos::from_secs_percent(pos.as_secs_f64(), duration);
-                call_back(seek_pos);
-            }
-            PlayerMessage::Paus => {
-                println!("paused");
-                sink.pause();
-                tx_rust
-                    .send("paus".to_string())
-                    .expect("failed to send message to rhai");
-            }
-            PlayerMessage::Next => {
-                println!("next");
-                println!("not yet working");
-                tx_rust
-                    .send("next".to_string())
-                    .expect("failed to send message to rhai");
-            }
-            PlayerMessage::Prev => {
-                println!("prev");
-                println!("not yet working");
-                tx_rust
-                    .send("prev".to_string())
-                    .expect("failed to send message to rhai");
-            }
-            PlayerMessage::PlaySong(song) => {
-                let file = BufReader::new(File::open(song.path).expect("failed to load test file"));
-                let source = Decoder::new(file).expect("failed to create decoder from test file");
-                duration = source
-                    .total_duration()
-                    .expect("failed to get souce duration");
-                sink.append(source);
-                // sink.skip_one();
-            },
-        }
-    }
 }
